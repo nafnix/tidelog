@@ -43,7 +43,7 @@ class LogRecord(
         summary: FailureSummary[ExceptionT],
         context: ContextT | None,
         message: str,
-        endpoint: EndpointT | None,
+        endpoint: EndpointT,
     ) -> FailureDetail[ExceptionT, ContextT | None, EndpointT]:
         return FailureDetail(
             message=message,
@@ -93,7 +93,7 @@ class AsyncLogRecord(
         summary: FailureSummary[ExceptionT],
         context: ContextT | None,
         message: str,
-        endpoint: EndpointT | None,
+        endpoint: EndpointT,
     ) -> FailureDetail[ExceptionT, ContextT | None, EndpointT]:
         return FailureDetail(
             message=message,

@@ -51,4 +51,4 @@ class FailureDetail(
 ):
     message: str
     context: ContextT
-    endpoint: EndpointT | None
+    endpoint: EndpointT

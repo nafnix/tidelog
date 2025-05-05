@@ -1,9 +1,9 @@
 import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Awaitable
-from functools import wraps
+from functools import wraps, partial
 from string import Template
-from typing import Any, Generic, TypeVar, overload, cast
+from typing import Any, Generic, TypeVar, overload, Annotated
 
 from fastapi.params import Depends
 
@@ -11,9 +11,11 @@ from ._types import ContextT, ExceptionT, P, T, MessageTemplate, EndpointT
 from .context import LogRecordContextT, AsyncLogRecordContextT, AnyLogRecordContextT
 from .models import FailureDetail, FailureSummary, SuccessDetail, SuccessSummary
 from .utils import (
-    add_parameter,
+    is_annotation,
     is_awaitable,
     is_failure,
+    get_annotation_metadata,
+    get_annotation_type,
     is_success,
     list_parameters,
     sync_execute,
@@ -27,7 +29,7 @@ _FailureDetailT = TypeVar("_FailureDetailT", bound=FailureDetail)
 
 
 class Handler(Generic[_SuccessDetailT, _FailureDetailT, P]):
-    def before(self, Callable, *args: P.args, **kwds: P.kwargs): ...
+    def before(self, *args: P.args, **kwds: P.kwargs): ...
     def after(
         self,
         detail: _SuccessDetailT | _FailureDetailT,
@@ -114,6 +116,7 @@ class _AbstractLogRecord(
 
         # 用于判断当前装饰的是哪个端点
         self._endpoints: dict[Callable, EndpointT] = {}
+        self._bind = {}
 
         if dependencies:
             if isinstance(dependencies, dict):
@@ -126,16 +129,16 @@ class _AbstractLogRecord(
         if utils:
             if isinstance(utils, dict):
                 for name, fn in utils.items():
-                    self.register_function(fn, name)
+                    self.register_utils(fn, name)
             else:
                 for fn in utils:
-                    self.register_function(fn)
+                    self.register_utils(fn)
 
     @overload
-    def register_function(self, fn: Callable): ...
+    def register_utils(self, fn: Callable): ...
     @overload
-    def register_function(self, fn: Callable, name: str): ...
-    def register_function(self, fn: Callable, name: str | None = None):
+    def register_utils(self, fn: Callable, name: str): ...
+    def register_utils(self, fn: Callable, name: str | None = None):
         self.functions[name or fn.__name__] = fn
 
     def description(self) -> str | None: ...
@@ -145,13 +148,15 @@ class _AbstractLogRecord(
     @overload
     def add_dependency(self, dependency: Depends, name: str): ...
     def add_dependency(self, dependency: Depends, name: str | None = None):
+        assert callable(dependency.dependency), (
+            "The dependency must be a callable function"
+        )
         name = name or (dependency.dependency and dependency.dependency.__name__)
-        assert name, "The dependency must be a callable function"
 
         if name in self.dependencies:
             raise ValueError(f"The dependency name {name} is already in use")
 
-        self.dependencies[name] = dependency
+        self.dependencies.setdefault(name, dependency)
 
     def add_handler(self, handler: _HandlerT, /):
         self.handlers.append(handler)
@@ -162,65 +167,147 @@ class _AbstractLogRecord(
     def add_failure_handler(self, handler: _FailureHandlerT, /):
         self.failure_handlers.append(handler)
 
-    def _log_record_deps(self):
+    def _bind_fn(self, endpoint: EndpointT, fn: Callable):
+        self._bind.setdefault(fn, endpoint)
+
+    def _log_record_deps(self, endpoint: EndpointT):
         if not self.dependencies:
             return None
 
         def log_record_dependencies(**kwargs):
             return kwargs
 
-        parameters = [
-            inspect.Parameter(
-                name=name,
-                kind=inspect.Parameter.KEYWORD_ONLY,
-                default=dep,
+        parameters = []
+        for name, dep in self.dependencies.items():
+            assert dep.dependency is not None
+
+            parameters.append(
+                inspect.Parameter(
+                    name=name,
+                    kind=inspect.Parameter.KEYWORD_ONLY,
+                    default=Depends(
+                        self._log_function(dep.dependency, endpoint),
+                        use_cache=dep.use_cache,
+                    ),
+                )
             )
-            for name, dep in self.dependencies.items()
-        ]
 
         update_signature(log_record_dependencies, parameters=parameters)
 
         return log_record_dependencies
 
-    def _endpoint_deps(self, fn: Callable) -> Callable | None:
-        if parameters := list_parameters(fn):
+    def _wrap_dependency(self, parameter: inspect.Parameter, endpoint: EndpointT):
+        default = parameter.default
+        annotation = parameter.annotation
+        # e.g.
+        # 1. def endpoint(value=Depends(dependency_function)): ...
+        # 2. >>>>>>
+        #    class Value:
+        #        def __init__(self, demo: int):
+        #            self.demo = demo
+        #
+        #    def endpoint(value: Value = Depends()): ...
+        #    <<<<<<
+        if isinstance(default, Depends):
+            # handle 1
+            if default.dependency:
+                new_dep = Depends(
+                    self._log_function(default.dependency, endpoint),
+                    use_cache=default.use_cache,
+                )
+                self._bind.setdefault(default.dependency, endpoint)
+                return parameter.replace(default=new_dep)
+            # handle 2
+            elif inspect.isclass(annotation):
+                self._bind.setdefault(default.dependency, endpoint)
+                return parameter.replace(
+                    annotation=self._log_function(annotation, endpoint)
+                )
+
+        # e.g.
+        # 1. >>>>>>
+        #    class Value:
+        #        def __init__(self, demo: int):
+        #            self.demo = demo
+        #
+        #    def endpoint(value: Annotated[Value, Depends()]): ...
+        #    <<<<<<
+        #
+        # 2. >>>>>>
+        #    def endpoint(value: Annotated[Value, Depends(dependency_function)]): ...
+        #    <<<<<<
+        elif is_annotation(annotation):
+            typ = get_annotation_type(annotation)
+            metadata = []
+            cls_dep = True
+            for i in get_annotation_metadata(annotation):
+                if isinstance(i, Depends):
+                    if i.dependency:
+                        cls_dep = False
+                        new_dep = Depends(
+                            self._log_function(i.dependency, endpoint),
+                            use_cache=default.use_cache,
+                        )
+                        metadata.append(new_dep)
+                    else:
+                        metadata.append(i)
+            if cls_dep and inspect.isclass(typ):
+                typ = self._log_function(typ, endpoint)
+
+            return parameter.replace(annotation=Annotated[typ, *metadata])
+
+        return parameter
+
+    def _endpoint_deps(self, endpoint: EndpointT) -> Callable | None:
+        if parameters := list_parameters(endpoint):
 
             def endpoint_deps(*args, **kwargs):
                 return args, kwargs
 
-            update_signature(endpoint_deps, parameters=parameters)
+            update_signature(
+                endpoint_deps,
+                parameters=[self._wrap_dependency(p, endpoint) for p in parameters],
+            )
             return endpoint_deps
 
         return None
 
     @abstractmethod
-    def _log_function(self, fn) -> Callable: ...
+    def _log_function(self, fn: Callable, endpoint: EndpointT) -> Callable: ...
 
-    def __call__(self, fn: EndpointT):
-        ofn = fn
+    def __call__(self, endpoint: EndpointT):
+        ofn = endpoint
 
-        new_fn = None
         # 日志记录器本身所需的依赖
-        log_record_deps = self._log_record_deps()
+        log_record_deps = self._log_record_deps(endpoint)
+        parameters = []
         if callable(log_record_deps):
-            new_fn = add_parameter(
-                fn,
-                name=self._log_record_deps_name,
-                default=Depends(self._log_function(log_record_deps)),
+            parameters.append(
+                inspect.Parameter(
+                    name=self._log_record_deps_name,
+                    default=Depends(log_record_deps),
+                    kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
             )
 
         # 端点的依赖
-        endpoint_deps = self._endpoint_deps(fn)
+        endpoint_deps = self._endpoint_deps(endpoint)
         if callable(endpoint_deps):
-            new_fn = add_parameter(
-                new_fn if callable(new_fn) else fn,
-                name=self._endpoint_deps_name,
-                default=Depends(self._log_function(endpoint_deps)),
+            parameters.append(
+                inspect.Parameter(
+                    name=self._endpoint_deps_name,
+                    default=Depends(endpoint_deps),
+                    kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
             )
 
-        wrapped = new_fn or fn
-        self._endpoints[wrapped] = ofn
-        return self._log_function(wrapped)
+        new_fn = partial(endpoint)
+        update_signature(new_fn, parameters=parameters)
+        wraps(endpoint)(new_fn)
+
+        self._endpoints[new_fn] = ofn
+
+        return self._log_function(new_fn, endpoint)
 
 
 class AbstractLogRecord(
@@ -315,24 +402,22 @@ class AbstractLogRecord(
         summary: FailureSummary,
         message: str,
         context: ContextT | None,
-        endpoint: EndpointT | None,
+        endpoint: EndpointT,
     ) -> _FailureDetailT:
         raise NotImplementedError
 
-    def _log_function(self, fn: Callable):
+    def _log_function(self, fn: Callable, endpoint: EndpointT):
         @wraps(fn)
         def decorator(*args, **kwds):
             is_endpoint_fn = fn in self._endpoints
-            endpoint = None
-
-            for i in self.handlers:
-                i.before(*args, **kwds)
 
             log_record_deps = None
             context: ContextT | None = None
 
             if is_endpoint_fn:
-                endpoint = self._endpoints[fn]
+                for i in self.handlers:
+                    i.before(*args, **kwds)
+
                 log_record_deps = kwds.pop(self._log_record_deps_name, None)
 
                 kwds.setdefault(self._endpoint_deps_name, None)
@@ -364,7 +449,7 @@ class AbstractLogRecord(
                     summary=summary,
                     context=context,
                     message=message,
-                    endpoint=cast(EndpointT, endpoint),
+                    endpoint=endpoint,
                 )
 
                 for i in self.success_handlers:
@@ -500,15 +585,14 @@ class AbstractAsyncLogRecord(
         summary: FailureSummary,
         message: str,
         context: ContextT | None,
-        endpoint: EndpointT | None,
+        endpoint: EndpointT,
     ) -> _FailureDetailT:
         raise NotImplementedError
 
-    def _log_function(self, fn: Callable):
+    def _log_function(self, fn: Callable, endpoint: EndpointT):
         @wraps(fn)
         async def decorator(*args, **kwds):
             is_endpoint_fn = fn in self._endpoints
-            endpoint = None
 
             for i in self.handlers:
                 await i.before(*args, **kwds)
@@ -517,7 +601,6 @@ class AbstractAsyncLogRecord(
             context: ContextT | None = None
 
             if is_endpoint_fn:
-                endpoint = self._endpoints[fn]
                 log_record_deps = kwds.pop(self._log_record_deps_name, None)
                 args, kwds = kwds.pop(self._endpoint_deps_name, ((), {}))
 
@@ -543,7 +626,7 @@ class AbstractAsyncLogRecord(
                     summary=summary,
                     context=context,
                     message=message,
-                    endpoint=cast(EndpointT, endpoint),
+                    endpoint=endpoint,
                 )
 
                 for i in self.success_handlers:

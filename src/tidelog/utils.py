@@ -180,13 +180,25 @@ def is_dependency(value):
     return False
 
 
+def is_annotation(value) -> TypeGuard[Annotated]:
+    return get_origin(value) is Annotated
+
+
+def get_annotation_type(value: Annotated) -> type:
+    return value.__origin__
+
+
+def get_annotation_metadata(value: Annotated) -> tuple:
+    return value.__metadata__
+
+
 def get_dependency(value) -> Depends | FieldInfo | None:
     types = (Depends, FieldInfo)
 
     if isinstance(value, types):
         return value
 
-    if get_origin(value) is Annotated and isinstance(value.__metadata__[-1], types):
+    if is_annotation(value) and isinstance(value.__metadata__[-1], types):
         return value.__metadata__[-1]
 
     return None
