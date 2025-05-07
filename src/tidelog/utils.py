@@ -1,7 +1,8 @@
 import inspect
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import UTC, datetime
-from functools import partial, update_wrapper
+
+# from functools import partial, update_wrapper
 from typing import (
     Annotated,
     Any,
@@ -10,11 +11,11 @@ from typing import (
     TypeGuard,
     TypeVar,
     get_origin,
-    overload,
+    # overload,
 )
 
-from fastapi.params import Depends
-from pydantic.fields import FieldInfo
+# from fastapi.params import Depends
+# from pydantic.fields import FieldInfo
 
 from .models import FailureSummary, ResultSummary, SuccessSummary
 
@@ -54,15 +55,15 @@ def add_document(fn: Callable, document: str):
         fn.__doc__ += f"\n\n{document}"
 
 
-def new_function(
-    fn: Callable,
-    *,
-    parameters: Sequence[inspect.Parameter] | None | _Undefined = _undefined,
-    return_annotation: type | None | _Undefined = _undefined,
-):
-    result = update_wrapper(partial(fn), fn)
-    update_signature(result, parameters=parameters, return_annotation=return_annotation)
-    return result
+# def new_function(
+#     fn: Callable,
+#     *,
+#     parameters: Sequence[inspect.Parameter] | None | _Undefined = _undefined,
+#     return_annotation: type | None | _Undefined = _undefined,
+# ):
+#     result = update_wrapper(partial(fn), fn)
+#     update_signature(result, parameters=parameters, return_annotation=return_annotation)
+#     return result
 
 
 def list_parameters(fn: Callable, /) -> list[inspect.Parameter]:
@@ -76,57 +77,57 @@ class WithParameterResult(NamedTuple):
     parameter_index: int
 
 
-@overload
-def with_parameter(
-    fn: Callable,
-    *,
-    name: str,
-    annotation: type | Annotated,
-) -> WithParameterResult: ...
-@overload
-def with_parameter(
-    fn: Callable,
-    *,
-    name: str,
-    default: Any,
-) -> WithParameterResult: ...
-@overload
-def with_parameter(
-    fn: Callable,
-    *,
-    name: str,
-    annotation: type | Annotated,
-    default: Any,
-) -> WithParameterResult: ...
+# @overload
+# def with_parameter(
+#     fn: Callable,
+#     *,
+#     name: str,
+#     annotation: type | Annotated,
+# ) -> WithParameterResult: ...
+# @overload
+# def with_parameter(
+#     fn: Callable,
+#     *,
+#     name: str,
+#     default: Any,
+# ) -> WithParameterResult: ...
+# @overload
+# def with_parameter(
+#     fn: Callable,
+#     *,
+#     name: str,
+#     annotation: type | Annotated,
+#     default: Any,
+# ) -> WithParameterResult: ...
 
 
-def with_parameter(
-    fn: Callable,
-    *,
-    name: str,
-    annotation: type | Annotated | _Undefined = _undefined,
-    default: Any = _undefined,
-) -> WithParameterResult:
-    kwargs = {}
-    if annotation is not _undefined:
-        kwargs["annotation"] = annotation
-    if default is not _undefined:
-        kwargs["default"] = default
+# def with_parameter(
+#     fn: Callable,
+#     *,
+#     name: str,
+#     annotation: type | Annotated | _Undefined = _undefined,
+#     default: Any = _undefined,
+# ) -> WithParameterResult:
+#     kwargs = {}
+#     if annotation is not _undefined:
+#         kwargs["annotation"] = annotation
+#     if default is not _undefined:
+#         kwargs["default"] = default
 
-    parameters = list_parameters(fn)
-    parameter = inspect.Parameter(
-        name=name,
-        kind=inspect.Parameter.KEYWORD_ONLY,
-        **kwargs,
-    )
-    index = -1
-    if parameters and parameters[index].kind == inspect.Parameter.VAR_KEYWORD:
-        parameters.insert(index, parameter)
-        index = -2
-    else:
-        parameters.append(parameter)
+#     parameters = list_parameters(fn)
+#     parameter = inspect.Parameter(
+#         name=name,
+#         kind=inspect.Parameter.KEYWORD_ONLY,
+#         **kwargs,
+#     )
+#     index = -1
+#     if parameters and parameters[index].kind == inspect.Parameter.VAR_KEYWORD:
+#         parameters.insert(index, parameter)
+#         index = -2
+#     else:
+#         parameters.append(parameter)
 
-    return WithParameterResult(parameters, parameter, index)
+#     return WithParameterResult(parameters, parameter, index)
 
 
 def update_signature(
@@ -146,38 +147,38 @@ def update_signature(
     setattr(fn, "__signature__", signature)
 
 
-def add_parameter(
-    fn: Callable,
-    *,
-    name: str,
-    annotation: type | Annotated | _Undefined = _undefined,
-    default: Any | _Undefined = _undefined,
-):
-    """添加参数, 会将添加参数后的新函数返回"""
+# def add_parameter(
+#     fn: Callable,
+#     *,
+#     name: str,
+#     annotation: type | Annotated | _Undefined = _undefined,
+#     default: Any | _Undefined = _undefined,
+# ):
+#     """添加参数, 会将添加参数后的新函数返回"""
 
-    p = with_parameter(
-        fn,
-        name=name,
-        annotation=annotation,
-        default=default,
-    )
+#     p = with_parameter(
+#         fn,
+#         name=name,
+#         annotation=annotation,
+#         default=default,
+#     )
 
-    new_fn = update_wrapper(partial(fn), fn)
-    if p.parameters:
-        update_signature(new_fn, parameters=p.parameters)
+#     new_fn = update_wrapper(partial(fn), fn)
+#     if p.parameters:
+#         update_signature(new_fn, parameters=p.parameters)
 
-    return new_fn
+#     return new_fn
 
 
-def is_dependency(value):
-    types = Depends | FieldInfo
+# def is_dependency(value):
+#     types = Depends | FieldInfo
 
-    if isinstance(value, types) or (
-        get_origin(value) is Annotated and isinstance(value.__metadata__[-1], types)
-    ):
-        return True
+#     if isinstance(value, types) or (
+#         get_origin(value) is Annotated and isinstance(value.__metadata__[-1], types)
+#     ):
+#         return True
 
-    return False
+#     return False
 
 
 def is_annotation(value) -> TypeGuard[Annotated]:
@@ -192,16 +193,16 @@ def get_annotation_metadata(value: Annotated) -> tuple:
     return value.__metadata__
 
 
-def get_dependency(value) -> Depends | FieldInfo | None:
-    types = (Depends, FieldInfo)
+# def get_dependency(value) -> Depends | FieldInfo | None:
+#     types = (Depends, FieldInfo)
 
-    if isinstance(value, types):
-        return value
+#     if isinstance(value, types):
+#         return value
 
-    if is_annotation(value) and isinstance(value.__metadata__[-1], types):
-        return value.__metadata__[-1]
+#     if is_annotation(value) and isinstance(value.__metadata__[-1], types):
+#         return value.__metadata__[-1]
 
-    return None
+#     return None
 
 
 def is_success(summary: ResultSummary) -> TypeGuard[SuccessSummary]:

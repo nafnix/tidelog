@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Awaitable
 from functools import wraps, partial
 from string import Template
-from typing import Any, Generic, TypeVar, overload, Annotated
+from typing import Any, Generic, TypeVar, overload, Annotated, Self
 
 from fastapi.params import Depends
 
@@ -78,12 +78,18 @@ _HandlerT = TypeVar("_HandlerT", bound=Handler | AsyncHandler)
 
 _SuccessHandlerT = TypeVar("_SuccessHandlerT", bound=Callable)
 _FailureHandlerT = TypeVar("_FailureHandlerT", bound=Callable)
+_UtilFunctionT = TypeVar("_UtilFunctionT", bound=Callable)
 
 
 class _AbstractLogRecord(
     ABC,
     Generic[
-        _HandlerT, _SuccessHandlerT, _FailureHandlerT, AnyLogRecordContextT, EndpointT
+        _HandlerT,
+        _SuccessHandlerT,
+        _FailureHandlerT,
+        AnyLogRecordContextT,
+        EndpointT,
+        _UtilFunctionT,
     ],
 ):
     _log_record_deps_name = "extra"
@@ -94,7 +100,7 @@ class _AbstractLogRecord(
         *,
         success: MessageTemplate | None = None,
         failure: MessageTemplate | None = None,
-        utils: list[Callable] | dict[str, Callable] | None = None,
+        functions: list[_UtilFunctionT] | dict[str, _UtilFunctionT] | None = None,
         dependencies: list[Depends] | dict[str, Depends] | None = None,
         context_factory: Callable[[], AnyLogRecordContextT] | None = None,
         handlers: list[_HandlerT] | None = None,
@@ -108,7 +114,7 @@ class _AbstractLogRecord(
 
         self.context_factory = context_factory
 
-        self.functions: dict[str, Callable] = {}
+        self.functions: dict[str, _UtilFunctionT] = {}
 
         self.handlers = handlers or []
         self.success_handlers = success_handlers or []
@@ -126,19 +132,19 @@ class _AbstractLogRecord(
                 for dep in dependencies:
                     self.add_dependency(dep)
 
-        if utils:
-            if isinstance(utils, dict):
-                for name, fn in utils.items():
-                    self.register_utils(fn, name)
+        if functions:
+            if isinstance(functions, dict):
+                for name, fn in functions.items():
+                    self.register_function(fn, name)
             else:
-                for fn in utils:
-                    self.register_utils(fn)
+                for fn in functions:
+                    self.register_function(fn)
 
     @overload
-    def register_utils(self, fn: Callable): ...
+    def register_function(self, fn: _UtilFunctionT): ...
     @overload
-    def register_utils(self, fn: Callable, name: str): ...
-    def register_utils(self, fn: Callable, name: str | None = None):
+    def register_function(self, fn: _UtilFunctionT, name: str): ...
+    def register_function(self, fn: _UtilFunctionT, name: str | None = None):
         self.functions[name or fn.__name__] = fn
 
     def description(self) -> str | None: ...
@@ -275,7 +281,75 @@ class _AbstractLogRecord(
     @abstractmethod
     def _log_function(self, fn: Callable, endpoint: EndpointT) -> Callable: ...
 
-    def __call__(self, endpoint: EndpointT):
+    @classmethod
+    def new(
+        cls,
+        *,
+        success: MessageTemplate | None = None,
+        failure: MessageTemplate | None = None,
+        functions: list[_UtilFunctionT] | dict[str, _UtilFunctionT] | None = None,
+        dependencies: list[Depends] | dict[str, Depends] | None = None,
+        context_factory: Callable[[], AnyLogRecordContextT] | None = None,
+        handlers: list[_HandlerT] | None = None,
+        success_handlers: list[_SuccessHandlerT] | None = None,
+        failure_handlers: list[_FailureHandlerT] | None = None,
+    ) -> Self:
+        return cls(
+            success=success,
+            failure=failure,
+            functions=functions,
+            dependencies=dependencies,
+            context_factory=context_factory,
+            handlers=handlers,
+            success_handlers=success_handlers,
+            failure_handlers=failure_handlers,
+        )
+
+    @overload
+    def __call__(self, endpoint: EndpointT) -> EndpointT: ...
+
+    @overload
+    def __call__(
+        self,
+        *,
+        success: MessageTemplate | None = None,
+        failure: MessageTemplate | None = None,
+        functions: list[_UtilFunctionT] | dict[str, _UtilFunctionT] | None = None,
+        dependencies: list[Depends] | dict[str, Depends] | None = None,
+        context_factory: Callable[[], AnyLogRecordContextT] | None = None,
+        handlers: list[_HandlerT] | None = None,
+        success_handlers: list[_SuccessHandlerT] | None = None,
+        failure_handlers: list[_FailureHandlerT] | None = None,
+    ) -> Callable[[EndpointT], EndpointT]: ...
+
+    def __call__(
+        self,
+        endpoint: EndpointT | None = None,
+        *,
+        success: MessageTemplate | None = None,
+        failure: MessageTemplate | None = None,
+        functions: list[_UtilFunctionT] | dict[str, _UtilFunctionT] | None = None,
+        dependencies: list[Depends] | dict[str, Depends] | None = None,
+        context_factory: Callable[[], AnyLogRecordContextT] | None = None,
+        handlers: list[_HandlerT] | None = None,
+        success_handlers: list[_SuccessHandlerT] | None = None,
+        failure_handlers: list[_FailureHandlerT] | None = None,
+    ):
+        def none_or(new, old) -> Any:
+            return old if new is None else new
+
+        if endpoint is None:
+            return self.new(
+                success=none_or(success, self.success),
+                failure=none_or(failure, self.failure),
+                functions=none_or(functions, self.functions),
+                dependencies=none_or(dependencies, self.dependencies),
+                context_factory=none_or(context_factory, self.context_factory),
+                handlers=none_or(handlers, self.handlers),
+                success_handlers=none_or(success_handlers, self.success_handlers),
+                failure_handlers=none_or(failure_handlers, self.failure_handlers),
+            )
+
         ofn = endpoint
 
         # 日志记录器本身所需的依赖
@@ -317,6 +391,7 @@ class AbstractLogRecord(
         Callable[[_FailureDetailT], None],
         LogRecordContextT,
         EndpointT,
+        Callable[P, Any],
     ],
     ABC,
     Generic[
@@ -356,7 +431,7 @@ class AbstractLogRecord(
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> str:
-        kwargs["$"] = {
+        kwargs["__"] = {
             "summary": summary,
             self._log_record_deps_name: extra,
             "context": context,
@@ -487,6 +562,8 @@ class AbstractLogRecord(
 
                 raise summary.exception
 
+            return summary.result
+
         return decorator
 
 
@@ -497,6 +574,7 @@ class AbstractAsyncLogRecord(
         Callable[[_FailureDetailT], None | Awaitable[None]],
         AsyncLogRecordContextT,
         EndpointT,
+        Callable[P, Awaitable | Any],
     ],
     ABC,
     Generic[
@@ -667,5 +745,7 @@ class AbstractAsyncLogRecord(
                     await i.after(detail, *args, **kwds)
 
                 raise summary.exception
+
+            return summary.result
 
         return decorator
